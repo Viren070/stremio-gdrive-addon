@@ -37,6 +37,7 @@ const CONFIG = {
         episodeFormat: "fullText",
         titleName: "name",
     },
+    driveFolderIds: [],
 };
 
 const MANIFEST = {
@@ -856,6 +857,11 @@ function buildBaseSearchQuery(query) {
         q += ` and mimeType contains 'video/'`;
     }
 
+    if (CONFIG.driveFolderIds && CONFIG.driveFolderIds.length > 0) {
+        const folderQueries = CONFIG.driveFolderIds.map(id => `'${id}' in parents`);
+        q += ` and (${folderQueries.join(' or ')})`;
+    }
+
     console.log({ message: "Built base search query", query: q });
     return q;
 }
@@ -869,6 +875,11 @@ async function buildSearchQuery(streamRequest) {
     query += CONFIG.showAudioFiles
         ? ` and (mimeType contains 'video/' or mimeType contains 'audio/')`
         : ` and mimeType contains 'video/'`;
+
+    if (CONFIG.driveFolderIds && CONFIG.driveFolderIds.length > 0) {
+        const folderQueries = CONFIG.driveFolderIds.map(id => `'${id}' in parents`);
+        query += ` and (${folderQueries.join(' or ')})`;
+    }    
 
     const sanitisedName = name
         .replace(/[^\p{L}\p{N}\s]/gu, "")
@@ -1087,9 +1098,17 @@ async function handleRequest(request) {
             console.log({ message: "Catalog request", catalogId, searchTerm });
 
             if (catalogId === "gdrive_list") {
-                // get list of all video files
+                const parts = [
+                    "trashed=false",
+                    "mimeType contains 'video/'"
+                ];
+                if (CONFIG.driveFolderIds && CONFIG.driveFolderIds.length > 0) {
+                    const ors = CONFIG.driveFolderIds.map(id => `'${id}' in parents`);
+                    parts.push(`(${ors.join(" or ")})`);
+                }
+
                 const queryParams = {
-                    q: "mimeType contains 'video/'",
+                    q: parts.join(" and "),
                     corpora: "allDrives",
                     includeItemsFromAllDrives: "true",
                     supportsAllDrives: "true",
