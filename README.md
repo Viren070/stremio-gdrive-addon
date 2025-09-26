@@ -2,7 +2,7 @@
 
 This is a simple addon for Stremio that allows you to watch videos from Google Drive.
 
-It searches your entire Google Drive and any shared drives you have access to for videos and presents them in Stremio.
+By default, it searches your entire Google Drive and any shared drives you have access to for videos and presents them in Stremio. You can optionally restrict results to specific folders via `CONFIG.driveFolderIds`.
 
 If you combine it with some team drives, you have loads of content, all available to watch for free and without torrenting.
 
@@ -15,6 +15,7 @@ If you combine it with some team drives, you have loads of content, all availabl
 - Catalog support - both search and full list on home page
 - Kitsu support.
 - TMDB Meta support if TMDB api key is provided.
+- Optional filtering by specific Google Drive folders (non-recursive).
 - Easily configurable using the `CONFIG` object at the top of the code. (See [Configuration](#configuration))
     - Change the addon name
     - Change the order of resolutions, qualities, visual tags, and filter them out if unwanted
@@ -233,3 +234,37 @@ This table explains the configuration options:
 |           `proxiedPlayback`           	|      `boolean`     	| `true`, `false`                                                                                                                                  	| With `proxiedPlayback` enabled, the file will be streamed through the addon. If it is disabled, Stremio will stream directly from Google Drive. <br><br>If this option is disabled, streaming will not work on Stremio Web or through external players on iOS. You are also exposing your access token in the addon responses. <br><br>However, this option is experimental and may cause issues.<br><br>I recommend leaving it enabled, and only if you encounter issues, try disabling this option. <br><br>Note, that even with this enabled, anyone with your addon URL can still view your Google Drive files.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         	|
 | `driveQueryTerms.`<br>`episodeFormat` 	|      `String`      	| `"name"`, `"fullText"` (see the Drive v3 API for more)                                                                                           	| This setting changes the object that we perform the queries upon for the episode formats (s01e03).<br><br>I recommend leaving this to fullText. However, if you are getting incorrect matches, try switching to name                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        	|
 |   `driveQueryTerms.`<br>`movieYear`   	|      `String`      	| `"name"`, `"fullText"`                                                                                                                           	| This setting changes the object that we perform queries upon for the release year of the movie.<br><br>I recommend leaving this to name. However, if you are getting incorrect matches, try switching to fullText.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          	|
+|            `driveFolderIds`            |     `String[]`      | Google Drive folder IDs (e.g., `"1abc..."`, `"2def..."`)                                                  | Restricts both catalog and search to files **directly** inside any of the listed folders. Multiple IDs allowed. **Non‑recursive** (subfolders are ignored).                                                                                                             |
+### Folder filtering
+
+**Quick start**
+
+```js
+const CONFIG = {
+  // ...
+  driveFolderIds: [
+    "<FOLDER_ID_1>",
+    "<FOLDER_ID_2>"
+  ]
+};
+```
+
+#### How to get the folder ID
+
+1) **Through the browser (URL bar)**
+   - Open the folder in Google Drive (web).
+   - Copy the part **after** `/folders/` in the URL.
+   - Example: 
+     `https://drive.google.com/drive/folders/1aBcD2E3fG4hiJ5k6LMnOpQRs7tuVXy-8` → **ID** = `1aBcD2E3fG4hiJ5k6LMnOpQRs7tuVXy-8`
+
+2) **By using "Get link"**
+   - Right-click on the folder → **Get link** → **Copy link**.
+   - The ID is the long string **between** `/folders/` and the `?` (if present) in the copied link.
+
+3) **Shared Drives**
+   - Same process: open the desired folder in the shared drive and copy the ID from the URL.
+
+> **Notes**
+> - The filter is **non-recursive**: subfolders are **not** automatically included. Add each subfolder in `driveFolderIds` if you want to include it.
+> - You can list **multiple** folder IDs in `driveFolderIds`.
+> - Make sure the account used in OAuth has access to these folders; otherwise, nothing will be returned.
