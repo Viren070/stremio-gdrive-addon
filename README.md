@@ -16,6 +16,7 @@ If you combine it with some team drives, you have loads of content, all availabl
 - Kitsu support.
 - TMDB Meta support if TMDB api key is provided.
 - Optional filtering by specific Google Drive folders (non-recursive).
+- **Secure Playback** — optionally encrypt Google Drive file IDs in playback URLs using AES-GCM to prevent extraction. (See [Secure Playback](#secure-playback))
 - Easily configurable using the `CONFIG` object at the top of the code. (See [Configuration](#configuration))
     - Change the addon name
     - Change the order of resolutions, qualities, visual tags, and filter them out if unwanted
@@ -235,6 +236,9 @@ This table explains the configuration options:
 | `driveQueryTerms.`<br>`episodeFormat` 	|      `String`      	| `"name"`, `"fullText"` (see the Drive v3 API for more)                                                                                           	| This setting changes the object that we perform the queries upon for the episode formats (s01e03).<br><br>I recommend leaving this to fullText. However, if you are getting incorrect matches, try switching to name                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        	|
 |   `driveQueryTerms.`<br>`movieYear`   	|      `String`      	| `"name"`, `"fullText"`                                                                                                                           	| This setting changes the object that we perform queries upon for the release year of the movie.<br><br>I recommend leaving this to name. However, if you are getting incorrect matches, try switching to fullText.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          	|
 |            `driveFolderIds`            |     `String[]`      | Google Drive folder IDs (e.g., `"1abc..."`, `"2def..."`)                                                  | Restricts both catalog and search to files **directly** inside any of the listed folders. Multiple IDs allowed. **Non‑recursive** (subfolders are ignored).                                                                                                             |
+|            `secureFileID`              |     `boolean`       | `true`, `false`                                                                                           | When enabled, Google Drive file IDs are encrypted using AES-GCM before being included in playback URLs. This prevents users from extracting raw file IDs from stream URLs. Requires `secureKey` to be set. Default: `false`. See [Secure Playback](#secure-playback).   |
+|            `secureKey`                 |     `String`        | any non-empty string                                                                                      | The passphrase used for AES-256-GCM encryption/decryption of file IDs. Required when `secureFileID` is `true`. Can also be set via the `SECURE_KEY` environment variable. See [Secure Playback](#secure-playback).                                                      |
+
 ### Folder filtering
 
 **Quick start**
@@ -268,3 +272,56 @@ const CONFIG = {
 > - The filter is **non-recursive**: subfolders are **not** automatically included. Add each subfolder in `driveFolderIds` if you want to include it.
 > - You can list **multiple** folder IDs in `driveFolderIds`.
 > - Make sure the account used in OAuth has access to these folders; otherwise, nothing will be returned.
+
+### Secure Playback
+
+By default, proxied playback URLs expose the raw Google Drive file ID:
+
+```
+/playback/{fileId}/{filename}
+```
+
+Anyone who intercepts these URLs can extract the file ID and access the file directly. **Secure Playback** solves this by encrypting file IDs with AES-256-GCM before embedding them in URLs:
+
+```
+/secure-playback/{encryptedFileId}/{filename}
+```
+
+The filename remains readable (it is not encrypted), but the file ID is fully protected.
+
+#### How it works
+
+1. Your `secureKey` is hashed with SHA-256 to derive a 256-bit AES key.
+2. Each file ID is encrypted with AES-GCM using a **random 12-byte IV** (never reused).
+3. The IV + ciphertext are combined and encoded as a URL-safe base64 string.
+4. When a `/secure-playback/` request arrives, the addon decrypts the file ID and proxies the stream.
+5. If decryption fails (wrong key, tampered data), the request is rejected with **403 Forbidden**.
+
+#### Setup
+
+**Option A — Hardcode in CONFIG:**
+
+```js
+const CONFIG = {
+  // ...
+  secureFileID: true,
+  secureKey: "your-secret-passphrase-here",
+};
+```
+
+**Option B — Use Cloudflare environment variable (recommended):**
+
+1. Set `secureFileID: true` in CONFIG.
+2. Add `SECURE_KEY` as a secret in your Cloudflare Worker:
+
+   ```bash
+   npx wrangler secret put SECURE_KEY
+   ```
+
+   Or set it in the Cloudflare dashboard under **Workers & Pages → your worker → Settings → Variables and Secrets**.
+
+> [!IMPORTANT]
+> - The feature is **off by default** (`secureFileID: false`). The existing `/playback/` route continues to work as before.
+> - If `secureFileID` is `true` but `secureKey` is missing, the addon will log an error and treat the configuration as invalid.
+> - Changing the `secureKey` will invalidate all previously generated encrypted URLs. Active streams may break until new URLs are generated.
+> - Uses the **Web Crypto API** (SubtleCrypto) — no external dependencies required, fully compatible with Cloudflare Workers.
