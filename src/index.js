@@ -38,6 +38,8 @@ const CONFIG = {
         titleName: "name",
     },
     driveFolderIds: [],
+    secureFileID: false,  // Set to true to encrypt file IDs in playback URLs
+    secureKey: "",        // Required when secureFileID is true — used for AES-GCM encryption
 };
 
 const MANIFEST = {
@@ -78,6 +80,7 @@ const API_ENDPOINTS = {
 const REGEX_PATTERNS = {
     validStreamRequest: /\/stream\/(movie|series)\/([a-zA-Z0-9%:\-_]+)\.json/,
     validPlaybackRequest: /\/playback\/([a-zA-Z0-9%:\-_]+)\/(.+)/,
+    validSecurePlaybackRequest: /\/secure-playback\/([A-Za-z0-9_-]+)\/(.+)/,
     validCatalogRequest:
         /\/catalog\/movie\/([a-zA-Z0-9%:\-_]+)(\/search=(.+))?\.json/,
     validMetaRequest: /\/meta\/(movie)\/([a-zA-Z0-9%:\-_]+)\.json/,
@@ -183,6 +186,84 @@ const REGEX_PATTERNS = {
     },
 };
 
+async function deriveEncryptionKey() {
+    const encoder = new TextEncoder();
+    const keyMaterial = encoder.encode(CONFIG.secureKey);
+    const keyHash = await crypto.subtle.digest("SHA-256", keyMaterial);
+    return crypto.subtle.importKey(
+        "raw",
+        keyHash,
+        { name: "AES-GCM" },
+        false,
+        ["encrypt", "decrypt"]
+    );
+}
+
+async function encryptFileId(fileId) {
+    try {
+        const key = await deriveEncryptionKey();
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const encoder = new TextEncoder();
+        const encoded = encoder.encode(fileId);
+
+        const ciphertext = await crypto.subtle.encrypt(
+            { name: "AES-GCM", iv: iv },
+            key,
+            encoded
+        );
+
+        const combined = new Uint8Array(iv.length + ciphertext.byteLength);
+        combined.set(iv, 0);
+        combined.set(new Uint8Array(ciphertext), iv.length);
+
+        const base64 = btoa(String.fromCharCode(...combined))
+            .replace(/\+/g, "-")
+            .replace(/\//g, "_")
+            .replace(/=+$/, "");
+        return base64;
+    } catch (error) {
+        console.error({
+            message: "Failed to encrypt file ID",
+            error: error.toString(),
+        });
+        return null;
+    }
+}
+
+async function decryptFileId(encrypted) {
+    try {
+        const key = await deriveEncryptionKey();
+
+        let base64 = encrypted.replace(/-/g, "+").replace(/_/g, "/");
+        while (base64.length % 4 !== 0) base64 += "=";
+
+        const combined = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+
+        if (combined.length < 13) {
+            console.error({ message: "Encrypted data too short" });
+            return null;
+        }
+
+        const iv = combined.slice(0, 12);
+        const ciphertext = combined.slice(12);
+
+        const decrypted = await crypto.subtle.decrypt(
+            { name: "AES-GCM", iv: iv },
+            key,
+            ciphertext
+        );
+
+        const decoder = new TextDecoder();
+        return decoder.decode(decrypted);
+    } catch (error) {
+        console.error({
+            message: "Failed to decrypt file ID",
+            error: error.toString(),
+        });
+        return null;
+    }
+}
+
 function formatSize(bytes) {
     if (bytes === 0) return "0 B";
     const k = 1000;
@@ -267,14 +348,13 @@ function compareByField(a, b, field) {
     return 0;
 }
 
-function createStream(parsedFile, accessToken) {
+async function createStream(parsedFile, accessToken) {
     let name = parsedFile.type.startsWith("audio")
         ? `[🎵 Audio] ${MANIFEST.name} ${parsedFile.extension.toUpperCase()}`
         : `${MANIFEST.name} ${parsedFile.resolution}`;
 
-    let description = `🎥 ${parsedFile.quality}   ${
-        parsedFile.encode ? "🎞️ " + parsedFile.encode : ""
-    }`;
+    let description = `🎥 ${parsedFile.quality}   ${parsedFile.encode ? "🎞️ " + parsedFile.encode : ""
+        }`;
 
     if (parsedFile.visualTags.length > 0 || parsedFile.audioTags.length > 0) {
         description += "\n";
@@ -320,9 +400,11 @@ function createStream(parsedFile, accessToken) {
     };
 
     if (CONFIG.proxiedPlayback) {
-        stream.url = `${globalThis.playbackUrl}/${
-            parsedFile.id
-        }/${encodeURIComponent(parsedFile.name)}`;
+        const fileIdentifier = CONFIG.secureFileID
+            ? await encryptFileId(parsedFile.id)
+            : parsedFile.id;
+        const basePath = CONFIG.secureFileID ? "secure-playback" : "playback";
+        stream.url = `${globalThis.playbackUrl.replace(/\/playback$/, "/" + basePath)}/${fileIdentifier}/${encodeURIComponent(parsedFile.name)}`;
     } else {
         stream.url = API_ENDPOINTS.DRIVE_STREAM_FILE.replace(
             "{fileId}",
@@ -508,6 +590,13 @@ function isConfigValid() {
         return false;
     }
 
+    if (CONFIG.secureFileID && !CONFIG.secureKey) {
+        console.error({
+            message: "secureFileID is enabled but secureKey is missing! Provide a secureKey in the config or set SECURE_KEY env variable.",
+        });
+        return false;
+    }
+
     return true;
 }
 
@@ -652,11 +741,11 @@ async function getTmdbMeta(type, id) {
         if (!data?.movie_results && !data?.tv_results) {
             throw new Error("No results found in response");
         }
-    
+
         result = data.movie_results[0] || data.tv_results[0];
 
     }
-    
+
     if (!result) {
         throw new Error("No results found in response");
     }
@@ -879,7 +968,7 @@ async function buildSearchQuery(streamRequest) {
     if (CONFIG.driveFolderIds && CONFIG.driveFolderIds.length > 0) {
         const folderQueries = CONFIG.driveFolderIds.map(id => `'${id}' in parents`);
         query += ` and (${folderQueries.join(' or ')})`;
-    }    
+    }
 
     const sanitisedName = name
         .replace(/[^\p{L}\p{N}\s]/gu, "")
@@ -999,12 +1088,15 @@ async function handleRequest(request) {
         const playbackMatch = REGEX_PATTERNS.validPlaybackRequest.exec(
             url.pathname
         );
+        const securePlaybackMatch = REGEX_PATTERNS.validSecurePlaybackRequest.exec(
+            url.pathname
+        );
         const catalogMatch = REGEX_PATTERNS.validCatalogRequest.exec(
             url.pathname
         );
         const metaMatch = REGEX_PATTERNS.validMetaRequest.exec(url.pathname);
 
-        if (!(playbackMatch || streamMatch || catalogMatch || metaMatch))
+        if (!(playbackMatch || securePlaybackMatch || streamMatch || catalogMatch || metaMatch))
             return new Response("Bad Request", { status: 400 });
 
         if (!isConfigValid()) {
@@ -1015,6 +1107,35 @@ async function handleRequest(request) {
                     ),
                 ],
             });
+        }
+
+        // Handle encrypted secure-playback route
+        if (securePlaybackMatch) {
+            if (!CONFIG.secureFileID || !CONFIG.secureKey) {
+                console.error({
+                    message: "Secure playback request received but secureFileID is disabled or secureKey is missing",
+                });
+                return new Response("Forbidden", { status: 403 });
+            }
+
+            const encryptedId = securePlaybackMatch[1];
+            const filename = decodeURIComponent(securePlaybackMatch[2]);
+
+            console.log({
+                message: "Processing secure playback request",
+                encryptedId: encryptedId.substring(0, 10) + "...",
+                range: request.headers.get("Range"),
+            });
+
+            const fileId = await decryptFileId(encryptedId);
+            if (!fileId) {
+                console.error({
+                    message: "Failed to decrypt file ID — invalid or tampered encrypted ID",
+                });
+                return new Response("Forbidden", { status: 403 });
+            }
+
+            return createProxiedStreamResponse(fileId, filename, request);
         }
 
         if (playbackMatch) {
@@ -1038,13 +1159,13 @@ async function handleRequest(request) {
                 `Size: ${formatSize(size)}` +
                 (createdTime
                     ? ` | Created: ${new Date(createdTime).toLocaleDateString(
-                          "en-GB",
-                          {
-                              year: "numeric",
-                              month: "long",
-                              day: "numeric",
-                          }
-                      )}`
+                        "en-GB",
+                        {
+                            year: "numeric",
+                            month: "long",
+                            day: "numeric",
+                        }
+                    )}`
                     : ""),
             type: "movie",
         });
@@ -1229,7 +1350,7 @@ async function handleRequest(request) {
 
             const parsedFile = parseFile(file);
             return createJsonResponse({
-                streams: [createStream(parsedFile, accessToken)],
+                streams: [await createStream(parsedFile, accessToken)],
             });
         }
 
@@ -1346,13 +1467,13 @@ async function getStreams(streamRequest) {
 
     const nameRegex = new RegExp(
         "(?<![^ [(_\\-.])(" +
-            streamRequest.metadata.name
-                .replace(/[^\w\s]/g, "[^\\w\\s]?")
-                .replace(/ /g, "[ .\\-_]?") +
-            (streamRequest.type === "movie"
-                ? `[ .\\-_]?${streamRequest.metadata.year}`
-                : "") +
-            ")(?=[ \\)\\]_.-]|$)",
+        streamRequest.metadata.name
+            .replace(/[^\w\s]/g, "[^\\w\\s]?")
+            .replace(/ /g, "[ .\\-_]?") +
+        (streamRequest.type === "movie"
+            ? `[ .\\-_]?${streamRequest.metadata.year}`
+            : "") +
+        ")(?=[ \\)\\]_.-]|$)",
         "i"
     );
     console.log({ message: "Name regex", nameRegex });
@@ -1365,21 +1486,20 @@ async function getStreams(streamRequest) {
     console.log(
         results.files.length - parsedFiles.length === 0
             ? {
-                  message: `${parsedFiles.length} files successfully parsed`,
-                  files: parsedFiles,
-              }
+                message: `${parsedFiles.length} files successfully parsed`,
+                files: parsedFiles,
+            }
             : {
-                  message: `${
-                      results.files.length - parsedFiles.length
-                  } files were filtered out after parsing`,
-                  filesFiltered: results.files.filter(
-                      (file) =>
-                          !parsedFiles.some(
-                              (parsedFile) => parsedFile.id === file.id
-                          )
-                  ),
-                  config: CONFIG,
-              }
+                message: `${results.files.length - parsedFiles.length
+                    } files were filtered out after parsing`,
+                filesFiltered: results.files.filter(
+                    (file) =>
+                        !parsedFiles.some(
+                            (parsedFile) => parsedFile.id === file.id
+                        )
+                ),
+                config: CONFIG,
+            }
     );
 
     sortParsedFiles(parsedFiles);
@@ -1389,9 +1509,9 @@ async function getStreams(streamRequest) {
         files: parsedFiles,
     });
 
-    parsedFiles.forEach((parsedFile) => {
-        streams.push(createStream(parsedFile, accessToken));
-    });
+    for (const parsedFile of parsedFiles) {
+        streams.push(await createStream(parsedFile, accessToken));
+    }
 
     return streams;
 }
@@ -1404,6 +1524,7 @@ export default {
         CREDENTIALS.refreshToken =
             CREDENTIALS.refreshToken || env.REFRESH_TOKEN;
         CONFIG.tmdbApiKey = CONFIG.tmdbApiKey || env.TMDB_API_KEY;
+        CONFIG.secureKey = CONFIG.secureKey || env.SECURE_KEY || "";
         return handleRequest(request);
     },
 };
