@@ -2,7 +2,7 @@
 
 This is a simple addon for Stremio that allows you to watch videos from Google Drive.
 
-By default, it searches your entire Google Drive and any shared drives you have access to for videos and presents them in Stremio. You can optionally restrict results to specific folders via `CONFIG.driveFolderIds`.
+By default, it searches the Google Drive folders and shared drives you have shared with your service account for videos and presents them in Stremio. You can optionally restrict results to specific folders via `CONFIG.driveFolderIds`.
 
 If you combine it with some team drives, you have loads of content, all available to watch for free and without torrenting.
 
@@ -30,7 +30,9 @@ This addon is designed to be deployed as a worker on Cloudflare Workers.
 Here is a guide to deploying this addon, taken from my site: [Viren070's guides](https://guides.viren070.me/stremio/addons/stremio-gdrive). This will most likely be easier to follow on my site, however. 
 
 
-### Setting up our Google App
+### Setting up our Google service account
+
+This addon authenticates with a Google **service account** instead of an OAuth client. There is no consent screen, no app to publish and no refresh token to obtain. The trade-off: a service account is its own Google identity with an empty Drive, so it can only see what you **share with it** (see step 6).
 
 1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
 
@@ -69,35 +71,7 @@ Here is a guide to deploying this addon, taken from my site: [Viren070's guides]
 
     </details>
 
-3.  Setup our Google Auth Platform 
-
-    1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
-    2. In the search bar at the top, search for `Google Auth Platform` and click on the result:
-
-        ![Google OAuth Platform](/images/google_cloud_oauth_search_results.png)
-
-    3. You should be met with a message telling you that `Google Auth Platform not configured yet`, click on `Get Started`: 
-    
-        ![Google OAuth Platform](/images/google_auth_platform_0.png)
-        
-    4. Fill in the form: 
-
-        ![Google OAuth Platform](/images/google_auth_platform_1.png)
-
-        1. `App Information`:
-            - Set `App Name` to `Stremio GDrive`.
-            - Set `User Support Email` to your email. It should appear in the dropdown. 
-        2. `Audience`:
-            - Set `User Type` to `External`.
-        3. `Contact Information`
-            - Add any email address, you can use the same one you used earlier for `User Support Email`.
-        4. `Finish`
-            - Check the box to agree to the `Google API Services: User Data Policy` 
-
-    
-    5. Once you have filled in the form, click on `Create`
-
-4. Enable the Google Drive API. 
+3. Enable the Google Drive API. 
 
     1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
     2. In the search bar at the top, search for `Google Drive API` and click on the result:
@@ -108,31 +82,34 @@ Here is a guide to deploying this addon, taken from my site: [Viren070's guides]
 
         ![Google Drive API](/images/google_cloud_gdrive_api.png)
 
-5. Create an OAuth client. 
+4. Create a service account.
 
-    1. Go back to the `Google Auth Platform` page.
-    2. Click on `Clients` in the sidebar and then click on `+ Create Client`:
+    1. In the Google Cloud Console search bar, search for `Service Accounts` (under `IAM & Admin`) and open it.
+    2. Click `+ Create service account`.
+    3. Set a name such as `stremio-gdrive` and click `Create and continue`.
+    4. Skip the optional `Grant access` and `Grant users access` steps and click `Done`.
+    5. Copy the account's email from the list. It looks like `stremio-gdrive@your-project.iam.gserviceaccount.com`. You will need it in steps 5 and 6.
 
-        ![Google OAuth Platform](/images/google_cloud_auth_platform_clients.png)
-    
-    3. Fill in the form: 
+5. Create a key for the service account.
 
-        ![Google OAuth Platform](/images/google_cloud_auth_platform_clients_form.png)
+    1. Click on the service account you just created and open the `Keys` tab.
+    2. Click `Add key` > `Create new key`, choose `JSON` and click `Create`.
+    3. A `.json` file is downloaded. Open it in a text editor. You need two fields from it:
+        - `client_email`
+        - `private_key` (the long text from `-----BEGIN PRIVATE KEY-----` to `-----END PRIVATE KEY-----`)
 
-        - `Application Type`: Set this to `Web application`.
-        - `Name`: You can set this to anything such as `Stremio GDrive`.
-        - `Authorized redirect URIs`: Set this to `https://guides.viren070.me/oauth/google/callback`
+    > Treat this file like a password. Anyone with it can read everything shared with the service account. Never commit it to Git or post it publicly.
+    >
+    > If your organisation blocks key creation (`iam.disableServiceAccountKeyCreation`), an admin has to lift that policy for your project first.
 
+6. Share your Drive content with the service account.
 
-    4. Click on `Create`.
+    The addon can only list files the service account has access to.
 
-6. Publish the app. 
+    - **Folder or file in My Drive:** right-click it in Google Drive > `Share`, paste the service account email and give it the `Viewer` role. Sharing a folder gives access to everything inside it.
+    - **Shared drive (team drive):** open the shared drive > `Manage members`, add the service account email and give it the `Viewer` (or `Content manager`) role.
 
-    1. Go back to the `Google Auth Platform` page.
-    2. Click on `Audience` in the sidebar and then click on `Publish`:
-
-        ![Google OAuth Platform](/images/google_cloud_auth_platform_publish.png)
-
+    Uncheck `Notify people`, since the service account has no inbox.
 
 ### Setting up the Cloudflare Worker
 
@@ -158,58 +135,46 @@ Here is a guide to deploying this addon, taken from my site: [Viren070's guides]
 
     ![Cloudflare Workers](/images/cloudflare_worker_editor.png)
 
-7. Now, we need to obtain the code for the addon that we will use specific to our Google Drive. 
-    First, we need to obtain our `Client ID` and `Client Secret` from the Google Cloud Console.
+7. Remove the existing code and paste the full contents of [`src/index.js`](src/index.js) from this repository.
 
-    1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
+8. Add your credentials. Pick **one** of these options:
 
-    2. In the search bar at the top, search for `Google Auth Platform` and click on the result:
+    - **Option A: edit the code (simplest).** At the top of the pasted code, fill in the `CREDENTIALS` object with the two values from the JSON key:
 
-        ![Google OAuth Platform](/images/google_cloud_oauth_search_results.png)
+        ```js
+        const CREDENTIALS = {
+            clientEmail: "stremio-gdrive@your-project.iam.gserviceaccount.com",
+            privateKey: "-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END PRIVATE KEY-----\n",
+        };
+        ```
 
-    3. Click on `Clients` and click on the download icon for the client you created earlier:
+        Paste `private_key` exactly as it appears in the JSON file, including the `\n` sequences and the BEGIN/END lines, inside double quotes. A real multi-line value (use backticks instead of quotes) also works.
 
-        ![Google OAuth Platform](/images/google_auth_platform_clients_download.png)
+    - **Option B: Cloudflare secrets (recommended if you share your code).** Leave `CREDENTIALS` empty. In the worker go to `Settings` > `Variables and Secrets` > `Add`, choose type `Secret` and create:
 
-    4. A pop-up will appear with your `Client ID` and `Client Secret`. 
+        | Name | Value |
+        |------|-------|
+        | `CLIENT_EMAIL` | the `client_email` from the JSON file |
+        | `PRIVATE_KEY` | the `private_key` from the JSON file |
 
-        ![Google OAuth Platform](/images/google_auth_platform_clients_download_menu.png)
+        Values written in the code take priority over the secrets.
 
-    5. You can click the copy icons to copy the `Client ID` and `Client Secret` to your clipboard for the next step.
+9. Click `Deploy` in the top right to save your changes and deploy the worker.
 
-8. Now, we can get the code for the Cloudflare Worker.
+10. Once deployed, you should see a green success message at the bottom. Click `Visit` next to the deploy button to go to the addon URL.
 
-    1. Go to the [OAuth Tool](https://guides.viren070.me/oauth/google)
+11. You should be redirected to the /manifest.json. if not, append `/manifest.json` to the URL in the address bar. 
 
-    2. Fill in the form with the `Client ID` and `Client Secret` from the previous step.
+12. Copy the URL and [add it to Stremio](https://guides.viren070.me/stremio/faq#how-do-i-install-an-addon-manually).  
 
-    3. Click `Authorise`
+Done! You have now set up your own addon which will allow you to stream videos from the Drive folders and shared drives you shared with the service account.
 
-    4. Sign in with your Google account and allow the app to access your Google Drive.
+### Troubleshooting
 
-        > You may encounter a warning page saying `Google hasn't verified this app`, click on `Advanced` and then `Go to... (unsafe)`.
-        >
-        > This warning is because the app is not verified by Google. This is normal for self-hosted apps.
-
-    5. You will be redirected back to the OAuth Tool with a success message. Click `Get Addon Code`.
-
-    6. You should be shown another success message. Then, make sure you're on the `Viren070` tab and you should see a block of code. Copy this code.
-    
-    7. Go back to the Cloudflare Worker editor and after removing the existing code, paste the code you copied.
-
-    8. Your code should look something like this:
-
-        ![Cloudflare Workers](/images/cloudflare_finished_worker_script.png)
-
-10. Click `Deploy` in the top right to save your changes and deploy the worker.
-
-11. Once deployed, you should see a green success message at the bottom. Click `Visit` next to the deploy button to go to the addon URL.
-
-12. You should be redirected to the /manifest.json. if not, append `/manifest.json` to the URL in the address bar. 
-
-13. Copy the URL and [add it to Stremio](https://guides.viren070.me/stremio/faq#how-do-i-install-an-addon-manually).  
-
-Done! You have now set up your own addon which will allow you to stream videos from your drives and team drives.
+- **Empty catalog or no streams:** the service account has nothing shared with it yet. Redo step 6 of the Google setup.
+- **`Missing clientEmail` / `Missing privateKey`:** the credentials are not set in the code or in the Cloudflare secrets.
+- **`privateKey must contain the full key...`:** the key was truncated or lost its BEGIN/END lines. Paste it again from the JSON file.
+- **`invalid_grant` in the worker logs:** the key was deleted or disabled in Google Cloud, or the Google Drive API is not enabled for the project.
 
 ## Configuration 
 
@@ -267,4 +232,4 @@ const CONFIG = {
 > **Notes**
 > - The filter is **non-recursive**: subfolders are **not** automatically included. Add each subfolder in `driveFolderIds` if you want to include it.
 > - You can list **multiple** folder IDs in `driveFolderIds`.
-> - Make sure the account used in OAuth has access to these folders; otherwise, nothing will be returned.
+> - Make sure the service account has access to these folders; otherwise, nothing will be returned.
