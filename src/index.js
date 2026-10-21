@@ -1,7 +1,8 @@
 const CREDENTIALS = {
-    clientId: "",
-    clientSecret: "",
-    refreshToken: "",
+    // Service account: Google Cloud > IAM > Service Accounts > Keys > JSON.
+    // Copy "client_email" and "private_key" from that file.
+    clientEmail: "",
+    privateKey: "",
 };
 
 const CONFIG = {
@@ -434,16 +435,12 @@ function parseFile(file) {
 function isConfigValid() {
     const requiredFields = [
         {
-            value: CREDENTIALS.clientId,
-            error: "Missing clientId. Add your client ID to the credentials object",
+            value: CREDENTIALS.clientEmail,
+            error: "Missing clientEmail! Add your service account email to the credentials object",
         },
         {
-            value: CREDENTIALS.clientSecret,
-            error: "Missing clientSecret! Add your client secret to the credentials object",
-        },
-        {
-            value: CREDENTIALS.refreshToken,
-            error: "Missing refreshToken! Add your refresh token to the credentials object",
+            value: CREDENTIALS.privateKey,
+            error: "Missing privateKey! Add your service account private key to the credentials object",
         },
         {
             value: CONFIG.addonName,
@@ -726,32 +723,80 @@ async function getImdbSuggestionMeta(id) {
     };
 }
 
+let cachedAccessToken = null;
+
+function base64UrlEncode(bytes) {
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+
 async function getAccessToken() {
-    const params = new URLSearchParams({
-        client_id: CREDENTIALS.clientId,
-        client_secret: CREDENTIALS.clientSecret,
-        refresh_token: CREDENTIALS.refreshToken,
-        grant_type: "refresh_token",
-    });
+    const now = Math.floor(Date.now() / 1000);
+    if (cachedAccessToken && cachedAccessToken.expiresAt - 60 > now) {
+        return cachedAccessToken.token;
+    }
 
     try {
+        const encoder = new TextEncoder();
+        const header = base64UrlEncode(
+            encoder.encode(JSON.stringify({ alg: "RS256", typ: "JWT" }))
+        );
+        const claims = base64UrlEncode(
+            encoder.encode(
+                JSON.stringify({
+                    iss: CREDENTIALS.clientEmail,
+                    scope: "https://www.googleapis.com/auth/drive.readonly",
+                    aud: API_ENDPOINTS.DRIVE_TOKEN,
+                    iat: now,
+                    exp: now + 3600,
+                })
+            )
+        );
+        const unsignedJwt = `${header}.${claims}`;
+
+        // Accept the bare key, a quoted value, or the whole JSON line/file: keep only the PEM body.
+        const pemBody = CREDENTIALS.privateKey
+            .replace(/\\n/g, "\n")
+            .match(/-----BEGIN PRIVATE KEY-----([\s\S]*?)-----END PRIVATE KEY-----/)?.[1]
+            ?.replace(/[^A-Za-z0-9+/=]/g, "");
+        if (!pemBody) {
+            throw new Error("privateKey must contain the full key from -----BEGIN PRIVATE KEY----- to -----END PRIVATE KEY-----");
+        }
+        const keyData = Uint8Array.from(atob(pemBody), (c) => c.charCodeAt(0));
+        const key = await crypto.subtle.importKey(
+            "pkcs8",
+            keyData,
+            { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+            false,
+            ["sign"]
+        );
+        const signature = await crypto.subtle.sign(
+            "RSASSA-PKCS1-v1_5",
+            key,
+            encoder.encode(unsignedJwt)
+        );
+
         const response = await fetch(API_ENDPOINTS.DRIVE_TOKEN, {
             method: "POST",
-            body: params,
+            body: new URLSearchParams({
+                grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                assertion: `${unsignedJwt}.${base64UrlEncode(new Uint8Array(signature))}`,
+            }),
             headers: { "Content-Type": "application/x-www-form-urlencoded" },
         });
 
         if (!response.ok) {
-            let err = await response.json();
-            throw new Error(JSON.stringify(err));
+            throw new Error(await response.text());
         }
 
-        const { access_token } = await response.json();
+        const { access_token, expires_in } = await response.json();
+        cachedAccessToken = { token: access_token, expiresAt: now + expires_in };
         return access_token;
     } catch (error) {
         console.error({
-            message: "Failed to refresh token",
-            error: JSON.parse(error.message),
+            message: "Failed to obtain service account access token",
+            error: error.toString(),
         });
         return undefined;
     }
@@ -1398,11 +1443,8 @@ async function getStreams(streamRequest) {
 
 export default {
     async fetch(request, env, ctx) {
-        CREDENTIALS.clientId = CREDENTIALS.clientId || env.CLIENT_ID;
-        CREDENTIALS.clientSecret =
-            CREDENTIALS.clientSecret || env.CLIENT_SECRET;
-        CREDENTIALS.refreshToken =
-            CREDENTIALS.refreshToken || env.REFRESH_TOKEN;
+        CREDENTIALS.clientEmail = CREDENTIALS.clientEmail || env.CLIENT_EMAIL;
+        CREDENTIALS.privateKey = CREDENTIALS.privateKey || env.PRIVATE_KEY;
         CONFIG.tmdbApiKey = CONFIG.tmdbApiKey || env.TMDB_API_KEY;
         return handleRequest(request);
     },
